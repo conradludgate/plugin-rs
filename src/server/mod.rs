@@ -1,39 +1,46 @@
+pub mod pb {
+    tonic::include_proto!("plugin");
+}
+
 pub(crate) mod broker;
 pub(crate) mod controller;
 pub(crate) mod stdio;
 
-use std::thread;
-
 use broker::BrokerServer;
-use futures::channel::mpsc::{channel, Receiver};
+use futures::channel::mpsc::channel as futures_channel;
+use futures::{FutureExt, StreamExt};
 use stdio::StdioServer;
+use tokio::sync::mpsc::{self, Receiver};
+use tonic::transport::Server;
 
-use crate::proto::{
-    broker_grpc::GRPCBrokerServer, controller_grpc::GRPCControllerServer,
-    stdio_grpc::GRPCStdioServer,
-};
-
+use self::broker::Broker;
 use self::controller::Controller;
 
 pub async fn create_server(err_rx: Receiver<Vec<u8>>, out_rx: Receiver<Vec<u8>>) {
-    let (send, recv1) = channel(0);
-    let (send1, recv) = channel(0);
+    // let (send, recv1) = mpsc::channel(0);
+    // let (send1, recv) = mpsc::channel(0);
 
-    let broker_def = GRPCBrokerServer::new_service_def(BrokerServer::new(send, recv));
-    let stdio_def = GRPCStdioServer::new_service_def(StdioServer::new(err_rx, out_rx));
+    // let broker_server = BrokerServer::new(send, recv);
+    // let broker = Broker::new(send1, recv1);
+    let stdio_server = StdioServer::new(err_rx, out_rx);
 
-    let controller_def = GRPCControllerServer::new_service_def(Controller {});
+    let (shutdown, signal) = futures_channel::<()>(0);
+    let signal = signal.into_future().map(|_| ());
 
-    let mut server_builder = grpc::ServerBuilder::new_plain();
-    server_builder.add_service(broker_def);
-    server_builder.add_service(stdio_def);
-    server_builder.add_service(controller_def);
-    server_builder.http.set_port(1234);
-    let server = server_builder.build().expect("build");
+    let controller = Controller::new(shutdown);
 
-    println!("server stared on addr {}", server.local_addr());
+    let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+    health_reporter.set_service_status("plugin", tonic_health::ServingStatus::Serving).await;
 
-    loop {
-        thread::park();
-    }
+    let addr = "[::1]:10000".parse().unwrap();
+    Server::builder()
+        // .add_service(pb::grpc_broker_server::GrpcBrokerServer::new(broker_server))
+        .add_service(pb::grpc_stdio_server::GrpcStdioServer::new(stdio_server))
+        .add_service(pb::grpc_controller_server::GrpcControllerServer::new(
+            controller,
+        ))
+        .add_service(health_service)
+        .serve_with_shutdown(addr, signal)
+        .await
+        .unwrap();
 }

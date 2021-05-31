@@ -4,14 +4,12 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::{channel::mpsc::Receiver, lock::Mutex, Stream, StreamExt};
-use grpc::Metadata;
+use super::pb;
 
-use crate::proto::{
-    controller::Empty,
-    stdio::{StdioData, StdioData_Channel},
-    stdio_grpc::GRPCStdio,
-};
+use futures::{lock::Mutex, Stream, StreamExt};
+use tokio::sync::mpsc::{channel, Receiver};
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Response, Status};
 
 pub struct StdioServer {
     io_stream: Arc<Mutex<IoStream>>,
@@ -38,16 +36,15 @@ pub struct IoStream {
 }
 
 impl Stream for IoStream {
-    type Item = StdioData;
+    type Item = pb::StdioData;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if !self.err_done {
-            match self.stderr.poll_next_unpin(cx) {
+            match self.stderr.poll_recv(cx) {
                 Poll::Ready(Some(data)) => {
-                    return Poll::Ready(Some(StdioData {
-                        channel: StdioData_Channel::STDERR,
+                    return Poll::Ready(Some(pb::StdioData {
+                        channel: pb::stdio_data::Channel::Stderr as i32,
                         data,
-                        ..Default::default()
                     }))
                 }
                 Poll::Ready(None) => {
@@ -58,12 +55,11 @@ impl Stream for IoStream {
         }
 
         if !self.out_done {
-            match self.stdout.poll_next_unpin(cx) {
+            match self.stdout.poll_recv(cx) {
                 Poll::Ready(Some(data)) => {
-                    return Poll::Ready(Some(StdioData {
-                        channel: StdioData_Channel::STDOUT,
+                    return Poll::Ready(Some(pb::StdioData {
+                        channel: pb::stdio_data::Channel::Stdout as i32,
                         data,
-                        ..Default::default()
                     }))
                 }
                 Poll::Ready(None) => {
@@ -81,23 +77,24 @@ impl Stream for IoStream {
     }
 }
 
-impl GRPCStdio for StdioServer {
-    fn stream_stdio(
+#[tonic::async_trait]
+impl pb::grpc_stdio_server::GrpcStdio for StdioServer {
+    async fn stream_stdio(
         &self,
-        ctx: ::grpc::ServerHandlerContext,
-        _: ::grpc::ServerRequestSingle<Empty>,
-        mut resp: ::grpc::ServerResponseSink<StdioData>,
-    ) -> ::grpc::Result<()> {
+        _: tonic::Request<pb::Empty>,
+    ) -> Result<tonic::Response<Self::StreamStdioStream>, tonic::Status> {
+        let (tx, rx) = channel(4);
         let io_stream = self.io_stream.clone();
 
-        ctx.spawn(async move {
+        tokio::spawn(async move {
             let mut io_stream = io_stream.lock().await;
             while let Some(m) = io_stream.next().await {
-                resp.send_data(m)?;
+                tx.send(Ok(m)).await.unwrap();
             }
-            resp.send_trailers(Metadata::new())
         });
 
-        Ok(())
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
+
+    type StreamStdioStream = ReceiverStream<Result<pb::StdioData, Status>>;
 }

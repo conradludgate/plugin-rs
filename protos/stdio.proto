@@ -1,7 +1,7 @@
 syntax = "proto3";
 package plugin;
 
-import "src/proto/controller.proto";
+import "controller.proto";
 
 // GRPCStdio is a service that is automatically run by the plugin process
 // to stream any stdout/err data so that it can be mirrored on the plugin
