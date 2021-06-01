@@ -16,11 +16,11 @@ pub struct StdioServer {
 }
 
 impl StdioServer {
-    pub fn new(err_rx: Receiver<Vec<u8>>, out_rx: Receiver<Vec<u8>>) -> StdioServer {
+    pub fn new(stderr_rx: Receiver<Vec<u8>>, stdout_rx: Receiver<Vec<u8>>) -> StdioServer {
         StdioServer {
             io_stream: Arc::new(Mutex::new(IoStream {
-                stderr: err_rx,
-                stdout: out_rx,
+                stderr_rx,
+                stdout_rx,
                 err_done: false,
                 out_done: false,
             })),
@@ -29,8 +29,8 @@ impl StdioServer {
 }
 
 pub struct IoStream {
-    stderr: Receiver<Vec<u8>>,
-    stdout: Receiver<Vec<u8>>,
+    stderr_rx: Receiver<Vec<u8>>,
+    stdout_rx: Receiver<Vec<u8>>,
     err_done: bool,
     out_done: bool,
 }
@@ -40,7 +40,7 @@ impl Stream for IoStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if !self.err_done {
-            match self.stderr.poll_recv(cx) {
+            match self.stderr_rx.poll_recv(cx) {
                 Poll::Ready(Some(data)) => {
                     return Poll::Ready(Some(pb::StdioData {
                         channel: pb::stdio_data::Channel::Stderr as i32,
@@ -55,7 +55,7 @@ impl Stream for IoStream {
         }
 
         if !self.out_done {
-            match self.stdout.poll_recv(cx) {
+            match self.stdout_rx.poll_recv(cx) {
                 Poll::Ready(Some(data)) => {
                     return Poll::Ready(Some(pb::StdioData {
                         channel: pb::stdio_data::Channel::Stdout as i32,
